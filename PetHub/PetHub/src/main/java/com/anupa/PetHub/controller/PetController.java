@@ -34,7 +34,15 @@ public class PetController {
     // Get all pets
     @GetMapping
     public List<Pet> getAllPets() {
-        return petRepository.findAll();
+        List<Pet> pets = petRepository.findAll();
+        // Populate sample data if empty
+        if (pets.isEmpty()) {
+            petRepository.save(new Pet("Buddy", "Dog", "default.jpg"));
+            petRepository.save(new Pet("Whiskers", "Cat", "default.jpg"));
+            petRepository.save(new Pet("Polly", "Parrot", "default.jpg"));
+            pets = petRepository.findAll();
+        }
+        return pets;
     }
 
     // Get pet by ID
