@@ -19,6 +19,14 @@ import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @RestController
 @RequestMapping("/pets")
@@ -63,6 +71,37 @@ public class PetController {
             @RequestParam("type") String type,
             @RequestParam("image") MultipartFile image) {
         try {
+            // ----- Python AI Image Verification -----
+            try {
+                RestTemplate restTemplate = new RestTemplate();
+                String pythonApiUrl = "http://localhost:8000/verify-pet-image";
+
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+                MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+                body.add("file", image.getResource());
+
+                HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+                ResponseEntity<String> pythonResponse = restTemplate.postForEntity(pythonApiUrl, requestEntity, String.class);
+
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode root = mapper.readTree(pythonResponse.getBody());
+                boolean isValid = root.path("is_valid").asBoolean();
+
+                if (!isValid) {
+                    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                            .body("Invalid photo. Please upload a clear picture of a cat or dog.");
+                }
+            } catch (Exception e) {
+                // If the python service is down, we can log it and fail the upload, 
+                // or you could choose to let it pass. We will fail it for security:
+                e.printStackTrace();
+                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                        .body("AI Verification Service is unavailable. Cannot upload pet.");
+            }
+            // ----- End AI Verification -----
+
             // Define absolute folder path (project root uploads folder)
             String uploadDir = new File("uploads").getAbsolutePath();
             File dir = new File(uploadDir);
