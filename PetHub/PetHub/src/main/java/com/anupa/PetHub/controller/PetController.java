@@ -129,6 +129,73 @@ public class PetController {
         }
     }
 
+    // Update pet with optional image
+    @PutMapping("/{id}")
+    public ResponseEntity<?> updatePet(
+            @PathVariable Long id,
+            @RequestParam("name") String name,
+            @RequestParam("type") String type,
+            @RequestParam(value = "image", required = false) MultipartFile image) {
+        try {
+            Optional<Pet> optionalPet = petRepository.findById(id);
+            if (!optionalPet.isPresent()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Pet not found");
+            }
+            Pet pet = optionalPet.get();
+            pet.setName(name);
+            pet.setType(type);
+
+            if (image != null && !image.isEmpty()) {
+                // ----- Python AI Image Verification -----
+                try {
+                    RestTemplate restTemplate = new RestTemplate();
+                    String pythonApiUrl = "http://localhost:8000/verify-pet-image";
+
+                    HttpHeaders headers = new HttpHeaders();
+                    headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+                    MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+                    body.add("file", image.getResource());
+
+                    HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+                    ResponseEntity<String> pythonResponse = restTemplate.postForEntity(pythonApiUrl, requestEntity, String.class);
+
+                    ObjectMapper mapper = new ObjectMapper();
+                    JsonNode root = mapper.readTree(pythonResponse.getBody());
+                    boolean isValid = root.path("is_valid").asBoolean();
+
+                    if (!isValid) {
+                        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                                .body("Invalid photo. Please upload a clear picture of a cat or dog.");
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body("AI Verification Service is unavailable. Cannot update pet image.");
+                }
+                // ----- End AI Verification -----
+
+                String uploadDir = new File("uploads").getAbsolutePath();
+                File dir = new File(uploadDir);
+                if (!dir.exists())
+                    dir.mkdirs();
+
+                String fileName = UUID.randomUUID() + "_" + image.getOriginalFilename();
+                Path filePath = Paths.get(uploadDir, fileName);
+
+                Files.copy(image.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+                pet.setImagePath(filePath.toString());
+            }
+
+            petRepository.save(pet);
+            return ResponseEntity.ok(pet);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Update failed");
+        }
+    }
+
     // Serve image
     @GetMapping("/image/{id}")
     public ResponseEntity<Resource> serveImage(@PathVariable Long id) {
