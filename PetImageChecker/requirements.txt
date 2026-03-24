@@ -3,3 +3,6 @@ uvicorn
 python-multipart
 ultralytics
 pillow
+psycopg[binary]
+neo4j
+python-dotenv

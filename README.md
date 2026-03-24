@@ -2,6 +2,12 @@
 
 This repository contains a Spring Boot backend and an Expo React Native frontend for a simple pet management app. Users can register, login, view a list of pets, and upload new pets with images.
 
+It now also includes an agentic AI symptom analysis flow:
+- User symptom message in Expo app
+- Spring Boot API bridge + PostgreSQL logging
+- FastAPI orchestrator pipeline
+- Neo4j + PostgreSQL data connectors
+
 ## Backend (Spring Boot)
 
 1. Open a terminal in `PetHub/PetHub`.
@@ -21,6 +27,8 @@ This repository contains a Spring Boot backend and an Expo React Native frontend
    - `GET /pets/{id}` – pet details
    - `POST /pets/upload` – add pet with image
    - `GET /pets/image/{id}` – serve pet image
+   - `POST /agent/chat` – send symptom text to orchestrator
+   - `GET /agent/admin/queries` – latest symptom requests (admin monitor)
 
 > ⚠️ When running on a device/emulator, make sure the frontend's `BASE_URL` matches the host machine. See frontend instructions below.
 
@@ -52,6 +60,8 @@ This repository contains a Spring Boot backend and an Expo React Native frontend
    - Upon success the app navigates to the pet list screen.
    - The initial pet list is seeded automatically if empty.
    - Add pets using the **+ Add Pet** button; images are uploaded to the backend.
+   - Open **Symptom Agent** from the home screen to submit symptoms.
+   - Open **Admin Monitor** from the home screen to view recent symptom requests.
 
 5. Logout using the button at the bottom of the list. Authentication state is saved to AsyncStorage, so closing and reopening the app will keep you logged in. If you ever see the login screen unexpectedly, check the Metro logs for error messages (we added extra console logs to `AuthContext.jsx` and `api.js` to help debugging).
 
@@ -66,6 +76,28 @@ This repository contains a Spring Boot backend and an Expo React Native frontend
 - **Network errors when fetching pets:**
   - Verify `BASE_URL` is correct for your environment.
   - Check backend console for incoming requests.
+
+- **Symptom Agent returns orchestrator unavailable:**
+  - Make sure the FastAPI service in `PetImageChecker` is running on port `8000`.
+
+
+## FastAPI Orchestrator (PetImageChecker)
+
+1. Start the service:
+   ```powershell
+   cd PetImageChecker
+   pip install -r requirements.txt
+   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+2. Agent orchestration endpoint:
+   - `POST /orchestrate/symptom`
+
+3. Optional DB environment variables:
+   - `POSTGRES_DSN` (example: `dbname=pethub user=postgres password=your_password host=localhost port=5432`)
+   - `NEO4J_URI` (example: `bolt://localhost:7687`)
+   - `NEO4J_USER`
+   - `NEO4J_PASSWORD`
 
 - **Layout warning:**
   - The layout has been updated to avoid

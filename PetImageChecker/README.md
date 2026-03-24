@@ -1,6 +1,8 @@
-# Pet Image Checker
+# Pet Image Checker + Symptom Orchestrator
 
-This backend uses **FastAPI** and **YOLOv8** to verify that an uploaded image contains a cat or a dog.
+This backend uses **FastAPI** for two AI services:
+- YOLOv8-based pet image verification
+- Agentic symptom orchestration with PostgreSQL + Neo4j integration
 
 ## Getting Started
 
@@ -17,6 +19,37 @@ Returns system status.
 
 ### `POST /verify-pet-image`
 Takes an image upload and responds with a JSON verification result.
+
+### `POST /orchestrate/symptom`
+Runs the AI flow for symptom analysis:
+- Input Handler
+- Prompt Processor
+- Task Planner
+- Agent Dispatcher
+- Service Layer (PostgreSQL + Neo4j)
+- Results Aggregator
+
+Request body example:
+```json
+{
+    "message": "my dog has fever and vomiting",
+    "user_email": "user@example.com",
+    "session_id": "session-123"
+}
+```
+
+### `GET /admin/orchestrator/status`
+Returns service status and DB connector readiness.
+
+
+## Optional Environment Variables
+
+- `POSTGRES_DSN`
+    - Example: `dbname=pethub user=postgres password=your_password host=localhost port=5432`
+- `NEO4J_URI`
+    - Example: `bolt://localhost:7687`
+- `NEO4J_USER`
+- `NEO4J_PASSWORD`
 
 **Example Request from React Native (Expo):**
 ```javascript
