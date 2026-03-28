@@ -3,6 +3,7 @@
 This backend uses **FastAPI** for two AI services:
 - YOLOv8-based pet image verification
 - Agentic symptom orchestration with PostgreSQL + Neo4j integration
+- OpenAI (ChatGPT API) response enhancement with safe fallback to rule-engine output
 
 ## Getting Started
 
@@ -29,6 +30,13 @@ Runs the AI flow for symptom analysis:
 - Service Layer (PostgreSQL + Neo4j)
 - Results Aggregator
 
+Response now includes structured fields for agentic chat UX:
+- `diagnosis_suggestion`
+- `care_tips` (max 6)
+- `emergency_guidance`
+- `urgency` (`low | medium | high`)
+- `follow_up_questions` (max 3)
+
 Request body example:
 ```json
 {
@@ -50,6 +58,16 @@ Returns service status and DB connector readiness.
     - Example: `bolt://localhost:7687`
 - `NEO4J_USER`
 - `NEO4J_PASSWORD`
+- `OPENROUTER_API_KEY`
+    - Preferred when using OpenRouter models
+- `OPENAI_API_KEY`
+    - Optional fallback key (used if `OPENROUTER_API_KEY` is not set)
+- `OPENAI_BASE_URL`
+    - Optional custom endpoint URL, defaulted automatically to `https://openrouter.ai/api/v1` when `OPENROUTER_API_KEY` is set
+- `OPENAI_MODEL`
+    - Optional, default: `gpt-4.1-mini`
+
+If neither `OPENROUTER_API_KEY` nor `OPENAI_API_KEY` is set (or the API is unreachable), the symptom endpoint still works using the built-in rule engine.
 
 **Example Request from React Native (Expo):**
 ```javascript

@@ -98,6 +98,10 @@ It now also includes an agentic AI symptom analysis flow:
    - `NEO4J_URI` (example: `bolt://localhost:7687`)
    - `NEO4J_USER`
    - `NEO4J_PASSWORD`
+   - `OPENROUTER_API_KEY` (optional, preferred for OpenRouter models)
+   - `OPENAI_API_KEY` (optional fallback key)
+   - `OPENAI_BASE_URL` (optional endpoint URL, auto-set to OpenRouter URL when `OPENROUTER_API_KEY` is present)
+   - `OPENAI_MODEL` (optional, default: `gpt-4.1-mini`)
 
 - **Layout warning:**
   - The layout has been updated to avoid

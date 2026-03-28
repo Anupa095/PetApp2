@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import re
@@ -27,6 +28,11 @@ try:
 except Exception:
     GraphDatabase = None
 
+try:
+    from openai import OpenAI  # type: ignore[import-not-found]
+except Exception:
+    OpenAI = None
+
 # Setup simple logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,9 +52,14 @@ ALLOWED_CLASSES = [15, 16]
 async def lifespan(app: FastAPI):
     global model
     logger.info("Loading YOLOv8 model...")
-    # This will download yolov8n.pt on the first run if it doesn't exist
-    model = YOLO("yolov8n.pt")
-    logger.info("YOLOv8 model loaded successfully.")
+    # Keep startup resilient so symptom orchestration still works even if YOLO init fails.
+    try:
+        # This will download yolov8n.pt on the first run if it doesn't exist.
+        model = YOLO("yolov8n.pt")
+        logger.info("YOLOv8 model loaded successfully.")
+    except Exception as ex:
+        model = None
+        logger.warning("YOLOv8 model failed to load at startup: %s", ex)
     yield
     # Clean up if needed
     model = None
@@ -59,6 +70,12 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # Return 204 so browser favicon probes do not produce noisy 404 logs.
+    return JSONResponse(status_code=204, content=None)
 
 
 class SymptomRequest(BaseModel):
@@ -465,6 +482,125 @@ class AgentDispatcher:
         }
 
 
+class LLMAdvisor:
+    def __init__(self):
+        self.api_key = (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        self.base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        if not self.base_url and os.getenv("OPENROUTER_API_KEY", "").strip():
+            self.base_url = "https://openrouter.ai/api/v1"
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        self.enabled = bool(self.api_key and OpenAI is not None)
+        if self.enabled:
+            client_kwargs = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self._client = OpenAI(**client_kwargs)
+        else:
+            self._client = None
+
+    def improve_response(
+        self,
+        message: str,
+        symptoms: List[str],
+        severity: str,
+        rule_diagnosis: str,
+        rule_care_tips: List[str],
+    ) -> Dict[str, Any]:
+        if not self.enabled or self._client is None:
+            return {}
+
+        system_prompt = (
+            "You are a veterinary triage assistant. "
+            "Provide cautious, non-definitive guidance and always recommend a veterinarian for persistent or severe symptoms. "
+            "Return strict JSON only (no markdown) with keys: diagnosis_suggestion (string), "
+            "care_tips (array of strings, max 6), emergency_guidance (string), urgency (low|medium|high), "
+            "follow_up_questions (array of strings, max 3)."
+        )
+        user_payload = {
+            "user_message": message,
+            "extracted_symptoms": symptoms,
+            "severity": severity,
+            "rule_based_diagnosis": rule_diagnosis,
+            "rule_based_care_tips": rule_care_tips,
+        }
+
+        try:
+            response = self._client.responses.create(
+                model=self.model,
+                temperature=0.2,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload)},
+                ],
+            )
+
+            text = getattr(response, "output_text", "") or ""
+            if not text:
+                return {}
+
+            # Handle plain JSON and fenced JSON outputs.
+            cleaned = text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```(?:json)?\\s*", "", cleaned)
+                cleaned = re.sub(r"\\s*```$", "", cleaned)
+
+            parsed = json.loads(cleaned)
+            if not isinstance(parsed, dict):
+                return {}
+
+            return self._normalize_output(parsed)
+        except Exception as ex:
+            logger.warning("OpenAI enhancement failed, falling back to rules: %s", ex)
+            return {}
+
+    @staticmethod
+    def _normalize_output(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        diagnosis = str(parsed.get("diagnosis_suggestion", "")).strip()
+        emergency = str(parsed.get("emergency_guidance", "")).strip()
+
+        tips_raw = parsed.get("care_tips", [])
+        tips: List[str] = []
+        if isinstance(tips_raw, list):
+            tips = [str(t).strip() for t in tips_raw if str(t).strip()]
+
+        urgency = str(parsed.get("urgency", "")).strip().lower()
+        if urgency not in {"low", "medium", "high"}:
+            urgency = ""
+
+        follow_up_raw = parsed.get("follow_up_questions", [])
+        follow_up_questions: List[str] = []
+        if isinstance(follow_up_raw, list):
+            follow_up_questions = [str(q).strip() for q in follow_up_raw if str(q).strip()]
+
+        return {
+            "diagnosis_suggestion": diagnosis,
+            "care_tips": tips[:6],
+            "emergency_guidance": emergency,
+            "urgency": urgency,
+            "follow_up_questions": follow_up_questions[:3],
+        }
+
+
+def severity_to_urgency(severity: str) -> str:
+    lowered = (severity or "").strip().lower()
+    if lowered in {"low", "medium", "high"}:
+        return lowered
+    return "medium"
+
+
+def default_follow_up_questions(symptoms: List[str]) -> List[str]:
+    questions: List[str] = []
+    if len(symptoms) < 2:
+        questions.append("How long have these symptoms been present?")
+    if not any(s in symptoms for s in {"fever", "vomiting", "diarrhea", "cough", "breathing"}):
+        questions.append("Any changes in eating, drinking, or energy level?")
+    questions.append("Has your pet eaten anything unusual in the last 24 hours?")
+    return list(dict.fromkeys(questions))[:3]
+
+
 def build_rule_based_care_tips(symptoms: List[str], diagnosis_text: str, severity: str) -> List[str]:
     tips_map = {
         "vomiting": "Offer small sips of water and avoid heavy food for a short period.",
@@ -531,6 +667,7 @@ def build_final_care_tips(
 
 
 SERVICE_LAYER = ServiceLayer()
+LLM_ADVISOR = LLMAdvisor()
 
 
 @app.post("/orchestrate/symptom")
@@ -557,6 +694,31 @@ async def orchestrate_symptom(request: SymptomRequest):
     emergency_guidance = "Visit the nearest veterinary clinic immediately."
     if symptom_result["severity"] != "high":
         emergency_guidance = "If symptoms continue for more than 24 hours, consult a veterinarian."
+    urgency = severity_to_urgency(symptom_result["severity"])
+    follow_up_questions = default_follow_up_questions(symptoms)
+
+    llm_result = LLM_ADVISOR.improve_response(
+        message=cleaned_message,
+        symptoms=symptoms,
+        severity=symptom_result["severity"],
+        rule_diagnosis=diagnosis_suggestion,
+        rule_care_tips=care_tips,
+    )
+    if llm_result.get("diagnosis_suggestion"):
+        diagnosis_suggestion = llm_result["diagnosis_suggestion"]
+    if llm_result.get("care_tips"):
+        care_tips = build_final_care_tips(
+            symptoms=symptoms,
+            diagnosis_text=diagnosis_suggestion,
+            severity=symptom_result["severity"],
+            postgres_tips=llm_result.get("care_tips", []),
+        )
+    if llm_result.get("emergency_guidance"):
+        emergency_guidance = llm_result["emergency_guidance"]
+    if llm_result.get("urgency"):
+        urgency = llm_result["urgency"]
+    if llm_result.get("follow_up_questions"):
+        follow_up_questions = llm_result["follow_up_questions"]
 
     SERVICE_LAYER.save_interaction(
         request.user_email,
@@ -570,8 +732,10 @@ async def orchestrate_symptom(request: SymptomRequest):
         "diagnosis_suggestion": diagnosis_suggestion,
         "care_tips": care_tips,
         "emergency_guidance": emergency_guidance,
+        "urgency": urgency,
+        "follow_up_questions": follow_up_questions,
         "confidence": prediction["confidence"],
-        "sources": prediction["sources"],
+        "sources": prediction["sources"] + (["openai"] if llm_result else []),
         "pipeline": {
             "input_handler": "done",
             "prompt_processor": {
@@ -589,6 +753,11 @@ async def orchestrate_symptom(request: SymptomRequest):
                 "neo4j_matches": graph_candidates,
                 "postgres_tips_used": len(postgres_tips),
             },
+            "llm": {
+                "provider": "openai" if llm_result else "rule-engine-only",
+                "enabled": LLM_ADVISOR.enabled,
+                "structured_output": True,
+            },
         },
     }
 
@@ -605,6 +774,7 @@ async def orchestrator_status():
         "status": "ok",
         "postgres_ready": postgres_ready,
         "neo4j_ready": neo4j_ready,
+        "openai_configured": LLM_ADVISOR.enabled,
         "neo4j_configured": bool(SERVICE_LAYER.neo4j_uri and SERVICE_LAYER.neo4j_password and GraphDatabase is not None),
         "postgres_configured": bool(SERVICE_LAYER.postgres_conn_str),
     }
@@ -626,7 +796,11 @@ async def verify_pet_image(file: UploadFile = File(...)):
         # Run inference using YOLOv8
         global model
         if model is None:
-            raise HTTPException(status_code=500, detail="Model is not loaded.")
+            try:
+                model = YOLO("yolov8n.pt")
+                logger.info("YOLOv8 model loaded on-demand for image verification.")
+            except Exception as ex:
+                raise HTTPException(status_code=503, detail=f"Model is unavailable: {str(ex)}")
             
         results = model.predict(source=image, conf=0.5, save=False)
         
