@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
@@ -52,16 +52,13 @@ ALLOWED_CLASSES = [15, 16]
 async def lifespan(app: FastAPI):
     global model
     logger.info("Loading YOLOv8 model...")
-    # Keep startup resilient so symptom orchestration still works even if YOLO init fails.
     try:
-        # This will download yolov8n.pt on the first run if it doesn't exist.
         model = YOLO("yolov8n.pt")
         logger.info("YOLOv8 model loaded successfully.")
     except Exception as ex:
         model = None
         logger.warning("YOLOv8 model failed to load at startup: %s", ex)
     yield
-    # Clean up if needed
     model = None
 
 app = FastAPI(
@@ -74,14 +71,13 @@ app = FastAPI(
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
-    # Return 204 so browser favicon probes do not produce noisy 404 logs.
     return JSONResponse(status_code=204, content=None)
 
 
 class SymptomRequest(BaseModel):
     message: str = Field(min_length=2, max_length=2000)
-    user_email: str = Field(default="anonymous@pethub.local")
-    session_id: str = Field(default="")
+    user_email: str = "anonymous@pethub.local"
+    session_id: str = ""
 
 
 class InputHandler:
@@ -93,18 +89,8 @@ class InputHandler:
 
 class PromptProcessor:
     STOP_WORDS = {
-        "my",
-        "the",
-        "is",
-        "and",
-        "has",
-        "have",
-        "pet",
-        "dog",
-        "cat",
-        "a",
-        "an",
-        "with",
+        "my", "the", "is", "and", "has", "have", "pet",
+        "dog", "cat", "a", "an", "with",
     }
 
     CANONICAL_SYMPTOMS = {
@@ -152,7 +138,6 @@ class PromptProcessor:
 
     @classmethod
     def extract_symptoms(cls, text: str) -> List[str]:
-        # Capture alphabetic words in multiple languages (including Sinhala transliterations typed in Latin).
         tokens = re.findall(r"[^\W\d_]+", text.lower(), flags=re.UNICODE)
         cleaned: List[str] = []
         for token in tokens:
@@ -491,13 +476,16 @@ class LLMAdvisor:
         self.base_url = os.getenv("OPENAI_BASE_URL", "").strip()
         if not self.base_url and os.getenv("OPENROUTER_API_KEY", "").strip():
             self.base_url = "https://openrouter.ai/api/v1"
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
         self.enabled = bool(self.api_key and OpenAI is not None)
         if self.enabled:
-            client_kwargs = {"api_key": self.api_key}
+            client_kwargs: Dict[str, Any] = {"api_key": self.api_key}
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url
-            self._client = OpenAI(**client_kwargs)
+            # OpenRouter requires the api-key header explicitly
+            if "openrouter.ai" in self.base_url:
+                client_kwargs["default_headers"] = {"HTTP-Referer": "https://pethub.local", "X-Title": "PetHub"}
+            self._client: Any = OpenAI(**client_kwargs)
         else:
             self._client = None
 
@@ -515,7 +503,7 @@ class LLMAdvisor:
         system_prompt = (
             "You are a veterinary triage assistant. "
             "Provide cautious, non-definitive guidance and always recommend a veterinarian for persistent or severe symptoms. "
-            "Return strict JSON only (no markdown) with keys: diagnosis_suggestion (string), "
+            "Return strict JSON only (no markdown, no code fences) with keys: diagnosis_suggestion (string), "
             "care_tips (array of strings, max 6), emergency_guidance (string), urgency (low|medium|high), "
             "follow_up_questions (array of strings, max 3)."
         )
@@ -528,24 +516,26 @@ class LLMAdvisor:
         }
 
         try:
-            response = self._client.responses.create(
+            # FIX: use chat.completions.create with messages= (not responses.create with input=)
+            response = self._client.chat.completions.create(
                 model=self.model,
                 temperature=0.2,
-                input=[
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_payload)},
                 ],
+                extra_body={"reasoning": {"enabled": True}}
             )
 
-            text = getattr(response, "output_text", "") or ""
+            text = response.choices[0].message.content or ""
             if not text:
                 return {}
 
-            # Handle plain JSON and fenced JSON outputs.
+            # FIX: corrected regex escaping — \s* not \\s*
             cleaned = text.strip()
             if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\\s*", "", cleaned)
-                cleaned = re.sub(r"\\s*```$", "", cleaned)
+                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+                cleaned = re.sub(r"\s*```$", "", cleaned)
 
             parsed = json.loads(cleaned)
             if not isinstance(parsed, dict):
@@ -553,7 +543,7 @@ class LLMAdvisor:
 
             return self._normalize_output(parsed)
         except Exception as ex:
-            logger.warning("OpenAI enhancement failed, falling back to rules: %s", ex)
+            logger.warning("LLM enhancement failed, falling back to rules: %s", ex)
             return {}
 
     @staticmethod
@@ -633,7 +623,6 @@ def build_rule_based_care_tips(symptoms: List[str], diagnosis_text: str, severit
         if tip:
             result.append(tip)
         else:
-            # Keep unknown but extracted symptoms actionable instead of returning generic tips only.
             result.append(f"Track changes related to '{symptom}' and share them with your veterinarian.")
 
     if not result:
@@ -643,7 +632,6 @@ def build_rule_based_care_tips(symptoms: List[str], diagnosis_text: str, severit
             "Avoid giving human medicine unless a vet approves it.",
         ]
 
-    # Deduplicate while preserving order.
     deduped = list(dict.fromkeys(result))
     return deduped[:6]
 
@@ -656,7 +644,6 @@ def build_final_care_tips(
 ) -> List[str]:
     base = build_rule_based_care_tips(symptoms, diagnosis_text, severity)
 
-    # Blend relevant DB tips without letting identical DB records dominate output.
     combined: List[str] = []
     for tip in base + postgres_tips:
         cleaned = str(tip).strip()
@@ -666,6 +653,7 @@ def build_final_care_tips(
     return combined[:6]
 
 
+# FIX: initialize after env vars are loaded (dotenv runs above at module level)
 SERVICE_LAYER = ServiceLayer()
 LLM_ADVISOR = LLMAdvisor()
 
@@ -720,9 +708,10 @@ async def orchestrate_symptom(request: SymptomRequest):
     if llm_result.get("follow_up_questions"):
         follow_up_questions = llm_result["follow_up_questions"]
 
+    # FIX: use timezone-aware datetime (utcnow() is deprecated in Python 3.12+)
     SERVICE_LAYER.save_interaction(
         request.user_email,
-        request.session_id or f"session-{int(datetime.utcnow().timestamp())}",
+        request.session_id or f"session-{int(datetime.now(timezone.utc).timestamp())}",
         cleaned_message,
         diagnosis_suggestion,
     )
@@ -779,21 +768,20 @@ async def orchestrator_status():
         "postgres_configured": bool(SERVICE_LAYER.postgres_conn_str),
     }
 
+
 @app.post("/verify-pet-image")
 async def verify_pet_image(file: UploadFile = File(...)):
     """
     Upload an image file and check if a cat or dog is detected.
     Returns {"is_valid": bool, "message": str}
     """
-    if not file.content_type.startswith("image/"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File provided is not an image.")
 
     try:
-        # Read the file from the upload
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        
-        # Run inference using YOLOv8
+
         global model
         if model is None:
             try:
@@ -801,20 +789,17 @@ async def verify_pet_image(file: UploadFile = File(...)):
                 logger.info("YOLOv8 model loaded on-demand for image verification.")
             except Exception as ex:
                 raise HTTPException(status_code=503, detail=f"Model is unavailable: {str(ex)}")
-            
+
         results = model.predict(source=image, conf=0.5, save=False)
-        
-        # Check detected classes
+
         detected_classes = []
         for result in results:
-            # result.boxes.cls contains the detected class indices
             if result.boxes is not None and result.boxes.cls is not None:
                 classes = result.boxes.cls.cpu().numpy().tolist()
                 detected_classes.extend([int(c) for c in classes])
-        
-        # Determine if any allowed class (cat/dog) is found
+
         has_pet = any(cls in ALLOWED_CLASSES for cls in detected_classes)
-        
+
         if has_pet:
             return JSONResponse({
                 "is_valid": True,
@@ -826,9 +811,12 @@ async def verify_pet_image(file: UploadFile = File(...)):
                 "message": "Invalid photo. No cat or dog detected."
             })
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing image: {str(e)}")
+        logger.error("Error processing image: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():

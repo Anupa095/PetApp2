@@ -38,8 +38,7 @@ public class AgentController {
         if (message.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "Symptom message is required"
-            ));
+                    "message", "Symptom message is required"));
         }
 
         SymptomQuery logEntry = new SymptomQuery();
@@ -53,18 +52,19 @@ public class AgentController {
             orchestratorRequest.put("session_id", sessionId);
 
             @SuppressWarnings("unchecked")
-            Map<String, Object> orchestratorResponse =
-                    restTemplate.postForObject(orchestratorUrl, orchestratorRequest, Map.class);
+            Map<String, Object> orchestratorResponse = restTemplate.postForObject(orchestratorUrl, orchestratorRequest,
+                    Map.class);
 
             logEntry.setStatus("SUCCESS");
-            logEntry.setResponseText(safeTruncate(orchestratorResponse == null ? "" : orchestratorResponse.toString(), 3900));
+            logEntry.setResponseText(
+                    safeTruncate(orchestratorResponse == null ? "" : orchestratorResponse.toString(), 3900));
             symptomQueryRepository.save(logEntry);
 
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("success", true);
-                response.put("sessionId", sessionId);
-                response.put("data", orchestratorResponse == null ? Map.of() : orchestratorResponse);
-                return ResponseEntity.ok(response);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("success", true);
+            response.put("sessionId", sessionId);
+            response.put("data", orchestratorResponse == null ? Map.of() : orchestratorResponse);
+            return ResponseEntity.ok(response);
         } catch (RestClientException ex) {
             logEntry.setStatus("FAILED");
             logEntry.setResponseText(safeTruncate(ex.getMessage(), 3900));
@@ -73,14 +73,39 @@ public class AgentController {
             return ResponseEntity.status(503).body(Map.of(
                     "success", false,
                     "message", "AI orchestrator service is unavailable",
-                    "details", ex.getMessage()
-            ));
+                    "details", ex.getMessage()));
         }
     }
 
     @GetMapping("/admin/queries")
     public List<SymptomQuery> recentQueries() {
         return symptomQueryRepository.findTop50ByOrderByCreatedAtDesc();
+    }
+
+    @GetMapping("/admin/severity-stats")
+    public List<Map<String, Object>> getSeverityStats() {
+        List<SymptomQuery> queries = symptomQueryRepository.findAll();
+        long low = 0, medium = 0, hard = 0;
+
+        for (SymptomQuery q : queries) {
+            String msg = q.getMessage() != null ? q.getMessage().toLowerCase() : "";
+            if (msg.contains("blood") || msg.contains("broken") || msg.contains("seizure") || msg.contains("unconscious") || msg.contains("severe")) {
+                hard++;
+            } else if (msg.contains("vomit") || msg.contains("diarrhea") || msg.contains("pain") || msg.contains("limp") || msg.contains("fever")) {
+                medium++;
+            } else {
+                low++;
+            }
+        }
+        
+        // Prevent all-zero chart which crashes react-native-chart-kit
+        if (low == 0 && medium == 0 && hard == 0) low = 1;
+
+        return List.of(
+            Map.of("name", "Low", "count", low, "color", "#4CAF50", "legendFontColor", "#7F7F7F", "legendFontSize", 15),
+            Map.of("name", "Medium", "count", medium, "color", "#FF9800", "legendFontColor", "#7F7F7F", "legendFontSize", 15),
+            Map.of("name", "Hard", "count", hard, "color", "#F44336", "legendFontColor", "#7F7F7F", "legendFontSize", 15)
+        );
     }
 
     private String safeTruncate(String text, int maxSize) {
