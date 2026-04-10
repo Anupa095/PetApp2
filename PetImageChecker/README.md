@@ -21,6 +21,12 @@ Returns system status.
 ### `POST /verify-pet-image`
 Takes an image upload and responds with a JSON verification result.
 
+Current scope:
+- Verifies pet photos using the YOLO-based image classifier.
+- This endpoint does not yet perform vaccination-card OCR or document authenticity checks.
+
+If you extend this service for vaccination cards, add an OCR step first, then validate extracted fields such as pet name, vaccine type, date, and vet name before approving the upload.
+
 ### `POST /orchestrate/symptom`
 Runs the AI flow for symptom analysis:
 - Input Handler
